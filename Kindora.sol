@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.24;
+pragma solidity 0.8.30;
 
 /// @title Kindora ERC20 token with fees, liquidity and charity routing
 /// @notice ERC20 token extended with buy/sell fees, auto-liquidity and charity routing
