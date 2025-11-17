@@ -1,6 +1,11 @@
-
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
+
+/// Kindora (KNR) — ERC20 with buy/sell fees, auto-liquidity and charity forwarding.
+/// - Adjusted to ensure: real burns (_burn), swapBack runs after fees are collected,
+///   swapBack only calls router when there are tokens to swap, and counters are
+///   decremented by processed amounts (avoid zeroing tracked counters incorrectly).
+/// - Added small observability events/getters for monitoring pending charity and token counters.
 
 interface IERC20 {
     function totalSupply() external view returns (uint256);
@@ -181,7 +186,7 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
     // BSC mainnet Pancake V2
     address public constant PANCAKE_ROUTER = 0x10ED43C718714eb63d5aA57B78B54704E256024E;
     address public constant WBNB_MAINNET   = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
-    address public constant FACTORY_V2 = 0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73;
+    address public constant FACTORY_V2     = 0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73;
     address public constant DEAD           = 0x000000000000000000000000000000000000dEaD;
 
     IUniswapV2Router02 public immutable uniswapV2Router;
@@ -370,6 +375,11 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         }
     }
 
+    /// @notice روشن/خاموش کردن محدودیت Anti-Whale (max tx / max wallet)
+    function setLimitsInEffect(bool enabled) external onlyOwner {
+        limitsInEffect = enabled;
+    }
+
     /// @notice Can later be pointed to a distributor contract
     function setCharityWallet(address payable newWallet) external onlyOwner {
         require(!charityWalletLocked, "charity wallet locked");
@@ -437,10 +447,15 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
     // ============== Swap & liquidity ==============
 
     function _swapTokensForEth(uint256 tokenAmount) private {
+        if (tokenAmount == 0) return;
+
         address[] memory path = new address[](2);
         path[0] = address(this);
         path[1] = uniswapV2Router.WETH();
+
         _approve(address(this), address(uniswapV2Router), tokenAmount);
+
+        // Swap tokens for native chain coin (BNB on BSC)
         uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
             tokenAmount,
             0,
@@ -478,8 +493,12 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         uint256 toSwapForETH = contractBalance - halfLiq;
 
         uint256 initialETH = address(this).balance;
-        _swapTokensForEth(toSwapForETH);
-        uint256 newETH = address(this).balance - initialETH;
+        uint256 newETH = 0;
+
+        if (toSwapForETH > 0) {
+            _swapTokensForEth(toSwapForETH);
+            newETH = address(this).balance - initialETH;
+        }
 
         uint256 ethForLiq     = toSwapForETH > 0 ? (newETH * halfLiq) / toSwapForETH : 0;
         uint256 ethForCharity = newETH - ethForLiq;
