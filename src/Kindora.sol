@@ -193,9 +193,8 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
     address public immutable uniswapV2Pair;
 
     address payable public charityWallet;
+    address public multisig;
 
-    bool public tradingActive = true;
-    bool public limitsInEffect = false;
     uint256 public maxTransactionAmount;
     uint256 public maxWallet;
 
@@ -207,16 +206,21 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
     uint16 public buyTotalFees;
     uint16 public sellTotalFees;
 
-    bool public feesLocked;
-    bool public feeExclusionsLocked;
-    bool public charityWalletLocked;
-    bool public maxTxExclusionsLocked;
-    bool public rescuesLocked;
+    // Packed configuration flags to reduce SSTOREs
+    uint256 private _flags;
+    uint256 private constant FLAG_TRADING_ACTIVE         = 1 << 0;
+    uint256 private constant FLAG_LIMITS_IN_EFFECT       = 1 << 1;
+    uint256 private constant FLAG_FEES_LOCKED            = 1 << 2;
+    uint256 private constant FLAG_FEE_EXCLUSIONS_LOCKED  = 1 << 3;
+    uint256 private constant FLAG_CHARITY_WALLET_LOCKED  = 1 << 4;
+    uint256 private constant FLAG_MAX_TX_EXCLUSIONS_LOCKED = 1 << 5;
+    uint256 private constant FLAG_RESCUES_LOCKED         = 1 << 6;
+    uint256 private constant FLAG_SWAP_ENABLED           = 1 << 7;
 
     // internal tracking of tokens assigned for charity & liquidity
     uint256 private tokensForCharity;
     uint256 private tokensForLiquidity;
-    uint256 private pendingEthForCharity;
+    uint256 private pendingBnbForCharity;
     bool private swapping;
 
     mapping(address => bool) public automatedMarketMakerPairs;
@@ -230,10 +234,13 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
     event MaxTxExclusionsLocked();
     event RescuesLocked();
     event SetAutomatedMarketMakerPair(address pair, bool value);
-    event AutoLiquify(uint256 tokenAmount, uint256 ethAmount);
-    event SwapBack(uint256 tokensSwapped, uint256 ethReceived);
+    event AutoLiquify(uint256 tokenAmount, uint256 bnbAmount);
+    event SwapBack(uint256 tokensSwapped, uint256 bnbReceived);
+    event SwapBackDetailed(uint256 tokensProcessed, uint256 liqTokens, uint256 bnbForLiq, uint256 bnbForCharity);
     event ExcludeFromFees(address indexed account, bool excluded);
     event PendingCharityUpdated(uint256 pending);
+    event MultisigUpdated(address indexed newMultisig);
+    event SwapEnabledUpdated(bool enabled);
 
     constructor() ERC20("Kindora", "KNR") {
         uint256 total = 1_000_000 * 1e18;
@@ -266,17 +273,16 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         _excludeFromFeesInternal(address(this), true);
         _excludeFromFeesInternal(DEAD, true);
 
-        feeExclusionsLocked = true;
+        // Initialize flags: trading active and swap enabled by default
+        _flags = FLAG_TRADING_ACTIVE | FLAG_FEES_LOCKED | FLAG_FEE_EXCLUSIONS_LOCKED | FLAG_SWAP_ENABLED;
         emit FeeExclusionsLocked();
+        emit FeesLocked();
 
         _isExcludedMaxTransactionAmount[owner()] = true;
         _isExcludedMaxTransactionAmount[address(this)] = true;
         _isExcludedMaxTransactionAmount[DEAD] = true;
         _isExcludedMaxTransactionAmount[_pair] = true;
         _isExcludedMaxTransactionAmount[address(_router)] = true;
-
-        feesLocked = true;
-        emit FeesLocked();
     }
 
     // ============== Internal helpers ==============
@@ -294,6 +300,38 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
 
     // ============== View helpers ==============
 
+    function isTradingActive() public view returns (bool) {
+        return (_flags & FLAG_TRADING_ACTIVE) != 0;
+    }
+
+    function isLimitsInEffect() public view returns (bool) {
+        return (_flags & FLAG_LIMITS_IN_EFFECT) != 0;
+    }
+
+    function isFeesLocked() public view returns (bool) {
+        return (_flags & FLAG_FEES_LOCKED) != 0;
+    }
+
+    function isFeeExclusionsLocked() public view returns (bool) {
+        return (_flags & FLAG_FEE_EXCLUSIONS_LOCKED) != 0;
+    }
+
+    function isCharityWalletLocked() public view returns (bool) {
+        return (_flags & FLAG_CHARITY_WALLET_LOCKED) != 0;
+    }
+
+    function isMaxTxExclusionsLocked() public view returns (bool) {
+        return (_flags & FLAG_MAX_TX_EXCLUSIONS_LOCKED) != 0;
+    }
+
+    function isRescuesLocked() public view returns (bool) {
+        return (_flags & FLAG_RESCUES_LOCKED) != 0;
+    }
+
+    function isSwapEnabled() public view returns (bool) {
+        return (_flags & FLAG_SWAP_ENABLED) != 0;
+    }
+
     function isExcludedFromFees(address account) external view returns (bool) { 
         return _isExcludedFromFees[account]; 
     }
@@ -306,8 +344,8 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         return tokensForLiquidity;
     }
 
-    function getPendingEthForCharity() external view returns (uint256) {
-        return pendingEthForCharity;
+    function getPendingBnbForCharity() external view returns (uint256) {
+        return pendingBnbForCharity;
     }
 
     /// @notice Raw fee values using 1/1000 denominator
@@ -377,42 +415,62 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
 
     /// @notice روشن/خاموش کردن محدودیت Anti-Whale (max tx / max wallet)
     function setLimitsInEffect(bool enabled) external onlyOwner {
-        limitsInEffect = enabled;
+        if (enabled) {
+            _flags |= FLAG_LIMITS_IN_EFFECT;
+        } else {
+            _flags &= ~FLAG_LIMITS_IN_EFFECT;
+        }
+    }
+
+    /// @notice Enable or disable swap functionality (circuit breaker)
+    function setSwapEnabled(bool enabled) external onlyOwner {
+        if (enabled) {
+            _flags |= FLAG_SWAP_ENABLED;
+        } else {
+            _flags &= ~FLAG_SWAP_ENABLED;
+        }
+        emit SwapEnabledUpdated(enabled);
+    }
+
+    /// @notice Set multisig address for rescue functions
+    function setMultisig(address newMultisig) external onlyOwner {
+        multisig = newMultisig;
+        emit MultisigUpdated(newMultisig);
     }
 
     /// @notice Can later be pointed to a distributor contract
     function setCharityWallet(address payable newWallet) external onlyOwner {
-        require(!charityWalletLocked, "charity wallet locked");
+        require(!isCharityWalletLocked(), "charity wallet locked");
         require(newWallet != address(0), "charity=0");
 
         charityWallet = newWallet;
 
         // Only if exclusions are not locked, owner could choose to fee-exempt the new wallet
-        if (!_isExcludedFromFees[newWallet] && !feeExclusionsLocked) {
+        if (!_isExcludedFromFees[newWallet] && !isFeeExclusionsLocked()) {
             _excludeFromFeesInternal(newWallet, true);
         }
     }
 
     function excludeFromMaxTransaction(address account, bool excluded) public onlyOwner {
-        require(!maxTxExclusionsLocked, "max-tx exclusions locked");
+        require(!isMaxTxExclusionsLocked(), "max-tx exclusions locked");
         _isExcludedMaxTransactionAmount[account] = excluded;
     }
 
     function lockCharityWallet() external onlyOwner { 
-        require(!charityWalletLocked, "already locked"); 
-        charityWalletLocked = true; 
+        require(!isCharityWalletLocked(), "already locked"); 
+        _flags |= FLAG_CHARITY_WALLET_LOCKED;
         emit CharityWalletLocked(); 
     }
 
     function lockMaxTxExclusions() external onlyOwner { 
-        require(!maxTxExclusionsLocked, "already locked"); 
-        maxTxExclusionsLocked = true; 
+        require(!isMaxTxExclusionsLocked(), "already locked"); 
+        _flags |= FLAG_MAX_TX_EXCLUSIONS_LOCKED;
         emit MaxTxExclusionsLocked(); 
     }
 
     function lockRescues() external onlyOwner { 
-        require(!rescuesLocked, "already locked"); 
-        rescuesLocked = true; 
+        require(!isRescuesLocked(), "already locked"); 
+        _flags |= FLAG_RESCUES_LOCKED;
         emit RescuesLocked(); 
     }
 
@@ -432,21 +490,23 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         emit AutoLiquify(tokenAmount, msg.value);
     }
 
-    function rescueTokens(address token, uint256 amount) external onlyOwner {
-        require(!rescuesLocked, "rescues locked");
+    function rescueTokens(address token, uint256 amount) external {
+        require(msg.sender == owner() || msg.sender == multisig, "not authorized");
+        require(!isRescuesLocked(), "rescues locked");
         require(token != address(this), "no self rescue");
-        require(IERC20(token).transfer(_msgSender(), amount), "rescue token failed");
+        require(IERC20(token).transfer(msg.sender, amount), "rescue token failed");
     }
 
-    function rescueETH(uint256 amount) external onlyOwner {
-        require(!rescuesLocked, "rescues locked");
-        (bool s,) = payable(_msgSender()).call{value: amount}("");
-        require(s, "rescue eth failed");
+    function rescueBNB(uint256 amount) external {
+        require(msg.sender == owner() || msg.sender == multisig, "not authorized");
+        require(!isRescuesLocked(), "rescues locked");
+        (bool s,) = payable(msg.sender).call{value: amount}("");
+        require(s, "rescue bnb failed");
     }
 
     // ============== Swap & liquidity ==============
 
-    function _swapTokensForEth(uint256 tokenAmount) private {
+    function _swapTokensForBnb(uint256 tokenAmount) private {
         if (tokenAmount == 0) return;
 
         address[] memory path = new address[](2);
@@ -465,9 +525,9 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         );
     }
 
-    function _addLiquidity(uint256 tokenAmount, uint256 ethAmount, address lpReceiver) private {
+    function _addLiquidity(uint256 tokenAmount, uint256 bnbAmount, address lpReceiver) private {
         _approve(address(this), address(uniswapV2Router), tokenAmount);
-        uniswapV2Router.addLiquidityETH{value: ethAmount}(
+        uniswapV2Router.addLiquidityETH{value: bnbAmount}(
             address(this),
             tokenAmount,
             0,
@@ -475,12 +535,14 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
             lpReceiver,
             block.timestamp
         );
-        emit AutoLiquify(tokenAmount, ethAmount);
+        emit AutoLiquify(tokenAmount, bnbAmount);
     }
 
     /// @dev swapBack processes up to swapTokensAtAmount * 20 tokens each run (batch cap).
     /// It now decrements tokensForCharity/tokensForLiquidity by the actual processed amounts (pro-rata).
     function swapBack() private nonReentrant {
+        if (!isSwapEnabled()) return;
+        
         uint256 contractBalance = balanceOf(address(this));
         uint256 totalToSwap = tokensForCharity + tokensForLiquidity;
         if (contractBalance == 0 || totalToSwap == 0) return;
@@ -490,35 +552,36 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
 
         uint256 liqTokens = (contractBalance * tokensForLiquidity) / totalToSwap;
         uint256 halfLiq   = liqTokens / 2;
-        uint256 toSwapForETH = contractBalance - halfLiq;
+        uint256 toSwapForBNB = contractBalance - halfLiq;
 
-        uint256 initialETH = address(this).balance;
-        uint256 newETH = 0;
+        uint256 initialBNB = address(this).balance;
+        uint256 newBNB = 0;
 
-        if (toSwapForETH > 0) {
-            _swapTokensForEth(toSwapForETH);
-            newETH = address(this).balance - initialETH;
+        if (toSwapForBNB > 0) {
+            _swapTokensForBnb(toSwapForBNB);
+            newBNB = address(this).balance - initialBNB;
         }
 
-        uint256 ethForLiq     = toSwapForETH > 0 ? (newETH * halfLiq) / toSwapForETH : 0;
-        uint256 ethForCharity = newETH - ethForLiq;
+        uint256 bnbForLiq     = toSwapForBNB > 0 ? (newBNB * halfLiq) / toSwapForBNB : 0;
+        uint256 bnbForCharity = newBNB - bnbForLiq;
 
-        if (halfLiq > 0 && ethForLiq > 0) {
-            _addLiquidity(halfLiq, ethForLiq, DEAD); // LP sent to DEAD
+        if (halfLiq > 0 && bnbForLiq > 0) {
+            _addLiquidity(halfLiq, bnbForLiq, DEAD); // LP sent to DEAD
         }
-        if (ethForCharity > 0 && charityWallet != address(0)) {
-            uint256 totalEthForCharity = ethForCharity + pendingEthForCharity;
-            (bool s,) = charityWallet.call{value: totalEthForCharity}("");
+        if (bnbForCharity > 0 && charityWallet != address(0)) {
+            uint256 totalBnbForCharity = bnbForCharity + pendingBnbForCharity;
+            (bool s,) = charityWallet.call{value: totalBnbForCharity}("");
             if (!s) {
-                pendingEthForCharity = totalEthForCharity;
-                emit PendingCharityUpdated(pendingEthForCharity);
+                pendingBnbForCharity = totalBnbForCharity;
+                emit PendingCharityUpdated(pendingBnbForCharity);
             } else {
-                pendingEthForCharity = 0;
+                pendingBnbForCharity = 0;
                 emit PendingCharityUpdated(0);
             }
         }
 
-        emit SwapBack(toSwapForETH, newETH);
+        emit SwapBack(toSwapForBNB, newBNB);
+        emit SwapBackDetailed(contractBalance, liqTokens, bnbForLiq, bnbForCharity);
 
         // --- adjust tracked counters by the amounts actually processed ---
         uint256 processedLiquidity = liqTokens;
@@ -550,7 +613,7 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
             return; 
         }
 
-        if (limitsInEffect && !swapping) {
+        if (isLimitsInEffect() && !swapping) {
             if (!_isExcludedMaxTransactionAmount[from] && !_isExcludedMaxTransactionAmount[to]) {
                 if (automatedMarketMakerPairs[from]) {
                     require(amount <= maxTransactionAmount, "max tx (buy)");

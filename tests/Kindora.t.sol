@@ -196,8 +196,8 @@ contract KindoraBehaviorTest is Test {
         token.transfer(user, t(1));
         vm.stopPrank();
 
-        uint256 pending = token.getPendingEthForCharity();
-        assertTrue(pending > 0, "pendingEthForCharity should be set when charity forwarding fails");
+        uint256 pending = token.getPendingBnbForCharity();
+        assertTrue(pending > 0, "pendingBnbForCharity should be set when charity forwarding fails");
 
         address payable goodCharity = payable(address(0xDEAD1));
         vm.deal(goodCharity, 0);
@@ -209,9 +209,9 @@ contract KindoraBehaviorTest is Test {
         token.transfer(user, t(1));
         vm.stopPrank();
 
-        uint256 pendingAfter = token.getPendingEthForCharity();
-        assertEq(pendingAfter, 0, "pendingEthForCharity should be zero after successful forwarding");
-        assertTrue(goodCharity.balance > 0, "charity should have received ETH after successful forward");
+        uint256 pendingAfter = token.getPendingBnbForCharity();
+        assertEq(pendingAfter, 0, "pendingBnbForCharity should be zero after successful forwarding");
+        assertTrue(goodCharity.balance > 0, "charity should have received BNB after successful forward");
     }
 
     function testPartialProcessingDoesNotZeroCounters() public {
@@ -241,5 +241,38 @@ contract KindoraBehaviorTest is Test {
 
         assertTrue(afterCharity < beforeCharity || afterLiq < beforeLiq, "some counters should be reduced");
         assertTrue(afterCharity + afterLiq < totalToSwap, "processed amount should reduce totalToSwap");
+    }
+
+    function testSwapBackDetailedEvent() public {
+        address pair = token.uniswapV2Pair();
+
+        vm.startPrank(deployer);
+        token.transfer(pair, t(2000));
+        vm.stopPrank();
+
+        vm.startPrank(pair);
+        token.transfer(buyer, t(1000));
+        vm.stopPrank();
+
+        uint256 contractBal = token.balanceOf(address(token));
+        assertTrue(contractBal >= token.swapTokensAtAmount(), "contract should have >= swapTokensAtAmount");
+
+        vm.deal(PANCAKE_ROUTER, 5 ether);
+
+        vm.recordLogs();
+        vm.startPrank(buyer);
+        token.transfer(user, t(1));
+        vm.stopPrank();
+
+        // Check that SwapBackDetailed event was emitted
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool foundDetailedEvent = false;
+        for (uint i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == keccak256("SwapBackDetailed(uint256,uint256,uint256,uint256)")) {
+                foundDetailedEvent = true;
+                break;
+            }
+        }
+        assertTrue(foundDetailedEvent, "SwapBackDetailed event should be emitted");
     }
 }
