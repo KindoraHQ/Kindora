@@ -197,7 +197,7 @@ contract KindoraBehaviorTest is Test {
         vm.stopPrank();
 
         uint256 pending = token.getPendingBnbForCharity();
-        assertTrue(pending > 0, "pendingEthForCharity should be set when charity forwarding fails");
+        assertTrue(pending > 0, "pendingBnbForCharity should be set when charity forwarding fails");
 
         address payable goodCharity = payable(address(0xDEAD1));
         vm.deal(goodCharity, 0);
@@ -210,8 +210,8 @@ contract KindoraBehaviorTest is Test {
         vm.stopPrank();
 
         uint256 pendingAfter = token.getPendingBnbForCharity();
-        assertEq(pendingAfter, 0, "pendingEthForCharity should be zero after successful forwarding");
-        assertTrue(goodCharity.balance > 0, "charity should have received ETH after successful forward");
+        assertEq(pendingAfter, 0, "pendingBnbForCharity should be zero after successful forwarding");
+        assertTrue(goodCharity.balance > 0, "charity should have received BNB after successful forward");
     }
 
     function testPartialProcessingDoesNotZeroCounters() public {
