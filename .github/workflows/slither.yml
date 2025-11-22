@@ -33,8 +33,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install slither-analyzer
 
+      - name: Clean
+        run: forge clean
+
       - name: Build contracts
-        run: forge build --build-info
+        run: forge build --build-info --no-cache
 
       - name: Run Slither
         run: slither . --fail-high
