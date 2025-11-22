@@ -228,7 +228,7 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
     mapping(address => bool) private _isExcludedMaxTransactionAmount;
 
     // Events
-    event TradingActiveUpdated(bool active);
+    event TradingEnabled(uint256 timestamp, address indexed operator);
     event FeeExclusionsLocked();
     event CharityWalletLocked();
     event MaxTxExclusionsLocked();
@@ -362,12 +362,14 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
 
     // ============== Owner functions ==============
 
-    function setTradingActive(bool active) external onlyOwner {
-        tradingActive = active;
-        emit TradingActiveUpdated(active);
+    function enableTrading() external onlyOwner {
+        require(!tradingActive, "Trading already enabled");
+        tradingActive = true;
+        emit TradingEnabled(block.timestamp, msg.sender);
     }
 
     function setAutomatedMarketMakerPair(address pair, bool value) external onlyOwner {
+        require(!tradingActive, "cannot change amm pairs after trading enabled");
         require(pair != address(0), "pair=0");
         _setAutomatedMarketMakerPair(pair, value);
         if (value) {
@@ -376,6 +378,7 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
     }
 
     function setLimitsInEffect(bool enabled) external onlyOwner {
+        require(!tradingActive, "cannot change limits after trading enabled");
         limitsInEffect = enabled;
     }
 
@@ -413,6 +416,7 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
 
     function excludeFromMaxTransaction(address account, bool excluded) public onlyOwner {
         require(!maxTxExclusionsLocked, "max-tx exclusions locked");
+        require(!tradingActive, "max-tx exclusions locked after trading enabled");
         _isExcludedMaxTransactionAmount[account] = excluded;
     }
 
