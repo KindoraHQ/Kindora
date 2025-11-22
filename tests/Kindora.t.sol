@@ -275,4 +275,120 @@ contract KindoraBehaviorTest is Test {
         }
         assertTrue(foundDetailedEvent, "SwapBackDetailed event should be emitted");
     }
+
+    function testEnableTradingOnlyOnce() public {
+        vm.startPrank(deployer);
+        
+        // Trading should start as inactive
+        assertFalse(token.tradingActive(), "Trading should start inactive");
+        
+        // Enable trading first time - should succeed
+        vm.recordLogs();
+        token.enableTrading();
+        assertTrue(token.tradingActive(), "Trading should be active after enableTrading");
+        
+        // Check TradingEnabled event was emitted
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool foundEvent = false;
+        for (uint i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == keccak256("TradingEnabled(uint256,address)")) {
+                foundEvent = true;
+                break;
+            }
+        }
+        assertTrue(foundEvent, "TradingEnabled event should be emitted");
+        
+        // Try to enable trading again - should revert
+        vm.expectRevert("Trading already enabled");
+        token.enableTrading();
+        
+        vm.stopPrank();
+    }
+
+    function testCannotChangeAMMPairsAfterTradingEnabled() public {
+        address newPair = address(0x1234);
+        
+        vm.startPrank(deployer);
+        
+        // Should work before trading is enabled
+        token.setAutomatedMarketMakerPair(newPair, true);
+        
+        // Enable trading
+        token.enableTrading();
+        
+        // Should revert after trading is enabled
+        vm.expectRevert("cannot change amm pairs after trading enabled");
+        token.setAutomatedMarketMakerPair(address(0x5678), true);
+        
+        vm.stopPrank();
+    }
+
+    function testCannotChangeLimitsAfterTradingEnabled() public {
+        vm.startPrank(deployer);
+        
+        // Should work before trading is enabled
+        token.setLimitsInEffect(true);
+        assertTrue(token.limitsInEffect(), "Limits should be enabled");
+        
+        // Enable trading
+        token.enableTrading();
+        
+        // Should revert after trading is enabled
+        vm.expectRevert("cannot change limits after trading enabled");
+        token.setLimitsInEffect(false);
+        
+        vm.stopPrank();
+    }
+
+    function testCannotChangeMaxTxExclusionsAfterTradingEnabled() public {
+        address testAddr = address(0xABCD);
+        
+        vm.startPrank(deployer);
+        
+        // Should work before trading is enabled
+        token.excludeFromMaxTransaction(testAddr, true);
+        
+        // Enable trading
+        token.enableTrading();
+        
+        // Should revert after trading is enabled
+        vm.expectRevert("max-tx exclusions locked after trading enabled");
+        token.excludeFromMaxTransaction(address(0x9999), true);
+        
+        vm.stopPrank();
+    }
+
+    function testTradingEnabledEventParameters() public {
+        vm.startPrank(deployer);
+        
+        uint256 beforeTimestamp = block.timestamp;
+        
+        vm.recordLogs();
+        token.enableTrading();
+        
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool foundEvent = false;
+        for (uint i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == keccak256("TradingEnabled(uint256,address)")) {
+                foundEvent = true;
+                // Decode the event data
+                (uint256 timestamp, address operator) = abi.decode(logs[i].data, (uint256, address));
+                assertEq(timestamp, beforeTimestamp, "Timestamp should match block.timestamp");
+                assertEq(operator, deployer, "Operator should be msg.sender (deployer)");
+                break;
+            }
+        }
+        assertTrue(foundEvent, "TradingEnabled event should be emitted with correct parameters");
+        
+        vm.stopPrank();
+    }
+
+    function testOnlyOwnerCanEnableTrading() public {
+        vm.startPrank(buyer);
+        
+        vm.expectRevert("Ownable: caller is not the owner");
+        token.enableTrading();
+        
+        vm.stopPrank();
+    }
 }
