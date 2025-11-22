@@ -361,8 +361,6 @@ contract KindoraBehaviorTest is Test {
     function testTradingEnabledEventParameters() public {
         vm.startPrank(deployer);
         
-        uint256 beforeTimestamp = block.timestamp;
-        
         vm.recordLogs();
         token.enableTrading();
         
@@ -371,9 +369,10 @@ contract KindoraBehaviorTest is Test {
         for (uint i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] == keccak256("TradingEnabled(uint256,address)")) {
                 foundEvent = true;
-                // Decode the event data
-                (uint256 timestamp, address operator) = abi.decode(logs[i].data, (uint256, address));
-                assertEq(timestamp, beforeTimestamp, "Timestamp should match block.timestamp");
+                // Decode the event data - timestamp is in data, operator is indexed (in topics[1])
+                uint256 timestamp = abi.decode(logs[i].data, (uint256));
+                address operator = address(uint160(uint256(logs[i].topics[1])));
+                assertEq(timestamp, block.timestamp, "Timestamp should match block.timestamp");
                 assertEq(operator, deployer, "Operator should be msg.sender (deployer)");
                 break;
             }
