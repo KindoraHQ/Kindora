@@ -30,11 +30,15 @@ jobs:
       - name: Clean
         run: forge clean
 
-      - name: Build contracts (with build-info)
+      - name: Build contracts (force build-info)
         env:
           FOUNDRY_PROFILE: default
         run: |
-          forge build --build-info --no-cache
+          forge build --build-info --no-cache --force
+          echo "=== out directory ==="
+          ls -la out || true
+          echo "=== out/build-info directory ==="
+          ls -la out/build-info || true
           test -d out/build-info
 
       - name: Setup Python
