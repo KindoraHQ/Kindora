@@ -2,8 +2,7 @@ name: Slither Analysis
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   pull_request:
 
 jobs:
@@ -14,6 +13,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -23,21 +24,28 @@ jobs:
       - name: Check forge version
         run: forge --version
 
+      - name: Install Foundry dependencies
+        run: forge install
+
+      - name: Clean
+        run: forge clean
+
+      - name: Build contracts (with build-info)
+        env:
+          FOUNDRY_PROFILE: default
+        run: |
+          forge build --build-info --no-cache
+          test -d out/build-info
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install Slither
         run: |
           python -m pip install --upgrade pip
           pip install slither-analyzer
-
-      - name: Clean
-        run: forge clean
-
-      - name: Build contracts
-        run: forge build --build-info --no-cache
 
       - name: Run Slither
         run: slither . --fail-high
