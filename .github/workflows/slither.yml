@@ -34,7 +34,7 @@ jobs:
           pip install slither-analyzer
 
       - name: Build contracts
-        run: forge build
+        run: forge build --build-info
 
       - name: Run Slither
         run: slither . --fail-high
