@@ -1,11 +1,14 @@
+
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
 /// Kindora (KNR) — ERC20 with buy/sell fees, auto-liquidity and charity forwarding.
-/// - Adjusted to ensure: real burns (_burn), swapBack runs after fees are collected,
-///   swapBack only calls router when there are tokens to swap, and counters are
-///   decremented by processed amounts (avoid zeroing tracked counters incorrectly).
-/// - Added small observability events/getters for monitoring pending charity and token counters.
+/// Audit-ready A+ cleanup:
+/// - Trading gate enforced (starts OFF; owner enables at launch).
+/// - Fees are immutable (no setters).
+/// - Fee-exclusion management is available prelaunch and lockable forever.
+/// - Manual liquidity LP is locked to DEAD.
+/// - Removed unused "feesLocked" state (since no fee setters).
 
 interface IERC20 {
     function totalSupply() external view returns (uint256);
@@ -43,15 +46,15 @@ abstract contract Ownable is Context {
         _;
     }
 
-    function transferOwnership(address newOwner) public virtual onlyOwner { 
-        require(newOwner != address(0), "Ownable: new owner is the zero address"); 
-        _transferOwnership(newOwner); 
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        _transferOwnership(newOwner);
     }
 
-    function _transferOwnership(address newOwner) internal virtual { 
-        address oldOwner = _owner; 
-        _owner = newOwner; 
-        emit OwnershipTransferred(oldOwner, newOwner); 
+    function _transferOwnership(address newOwner) internal virtual {
+        address oldOwner = _owner;
+        _owner = newOwner;
+        emit OwnershipTransferred(oldOwner, newOwner);
     }
 }
 
@@ -59,12 +62,12 @@ contract ERC20 is Context, IERC20, IERC20Metadata {
     mapping(address => uint256) internal _balances;
     mapping(address => mapping(address => uint256)) private _allowances;
     uint256 internal _totalSupply;
-    string private _name; 
+    string private _name;
     string private _symbol;
 
-    constructor(string memory name_, string memory symbol_) { 
-        _name = name_; 
-        _symbol = symbol_; 
+    constructor(string memory name_, string memory symbol_) {
+        _name = name_;
+        _symbol = symbol_;
     }
 
     function name() public view virtual override returns (string memory) { return _name; }
@@ -73,79 +76,79 @@ contract ERC20 is Context, IERC20, IERC20Metadata {
     function totalSupply() public view virtual override returns (uint256) { return _totalSupply; }
     function balanceOf(address account) public view virtual override returns (uint256) { return _balances[account]; }
 
-    function transfer(address to, uint256 amount) public virtual override returns (bool) { 
-        _transfer(_msgSender(), to, amount); 
-        return true; 
+    function transfer(address to, uint256 amount) public virtual override returns (bool) {
+        _transfer(_msgSender(), to, amount);
+        return true;
     }
 
-    function allowance(address owner_, address spender) public view virtual override returns (uint256) { 
-        return _allowances[owner_][spender]; 
+    function allowance(address owner_, address spender) public view virtual override returns (uint256) {
+        return _allowances[owner_][spender];
     }
 
-    function approve(address spender, uint256 amount) public virtual override returns (bool) { 
-        _approve(_msgSender(), spender, amount); 
-        return true; 
+    function approve(address spender, uint256 amount) public virtual override returns (bool) {
+        _approve(_msgSender(), spender, amount);
+        return true;
     }
 
     function transferFrom(address from, address to, uint256 amount) public virtual override returns (bool) {
         uint256 currentAllowance = _allowances[from][_msgSender()];
-        if (currentAllowance != type(uint256).max) { 
-            require(currentAllowance >= amount, "ERC20: transfer amount exceeds allowance"); 
-            unchecked { _approve(from, _msgSender(), currentAllowance - amount); } 
+        if (currentAllowance != type(uint256).max) {
+            require(currentAllowance >= amount, "ERC20: transfer amount exceeds allowance");
+            unchecked { _approve(from, _msgSender(), currentAllowance - amount); }
         }
-        _transfer(from, to, amount); 
+        _transfer(from, to, amount);
         return true;
     }
 
-    function increaseAllowance(address spender, uint256 addedValue) public virtual returns (bool) { 
-        _approve(_msgSender(), spender, _allowances[_msgSender()][spender] + addedValue); 
+    function increaseAllowance(address spender, uint256 addedValue) public virtual returns (bool) {
+        _approve(_msgSender(), spender, _allowances[_msgSender()][spender] + addedValue);
         return true;
     }
 
     function decreaseAllowance(address spender, uint256 subtractedValue) public virtual returns (bool) {
-        uint256 currentAllowance = _allowances[_msgSender()][spender]; 
-        require(currentAllowance >= subtractedValue, "ERC20: decreased allowance below zero"); 
-        unchecked { _approve(_msgSender(), spender, currentAllowance - subtractedValue); } 
+        uint256 currentAllowance = _allowances[_msgSender()][spender];
+        require(currentAllowance >= subtractedValue, "ERC20: decreased allowance below zero");
+        unchecked { _approve(_msgSender(), spender, currentAllowance - subtractedValue); }
         return true;
     }
 
     function _transfer(address from, address to, uint256 amount) internal virtual {
         require(from != address(0) && to != address(0), "ERC20: zero address");
-        uint256 fromBal = _balances[from]; 
+        uint256 fromBal = _balances[from];
         require(fromBal >= amount, "ERC20: transfer amount exceeds balance");
-        unchecked { _balances[from] = fromBal - amount; } 
-        _balances[to] += amount; 
+        unchecked { _balances[from] = fromBal - amount; }
+        _balances[to] += amount;
         emit Transfer(from, to, amount);
     }
 
-    function _mint(address to, uint256 amount) internal virtual { 
-        require(to != address(0), "ERC20: mint to zero"); 
-        _totalSupply += amount; 
-        _balances[to] += amount; 
-        emit Transfer(address(0), to, amount); 
+    function _mint(address to, uint256 amount) internal virtual {
+        require(to != address(0), "ERC20: mint to zero");
+        _totalSupply += amount;
+        _balances[to] += amount;
+        emit Transfer(address(0), to, amount);
     }
 
-    function _burn(address from, uint256 amount) internal virtual { 
-        require(from != address(0), "ERC20: burn from zero"); 
-        uint256 bal = _balances[from]; 
-        require(bal >= amount, "ERC20: burn exceeds balance"); 
-        unchecked { _balances[from] = bal - amount; } 
-        _totalSupply -= amount; 
-        emit Transfer(from, address(0), amount); 
+    function _burn(address from, uint256 amount) internal virtual {
+        require(from != address(0), "ERC20: burn from zero");
+        uint256 bal = _balances[from];
+        require(bal >= amount, "ERC20: burn exceeds balance");
+        unchecked { _balances[from] = bal - amount; }
+        _totalSupply -= amount;
+        emit Transfer(from, address(0), amount);
     }
 
-    function _approve(address owner_, address spender, uint256 amount) internal virtual { 
-        require(owner_ != address(0) && spender != address(0), "ERC20: approve zero"); 
-        _allowances[owner_][spender] = amount; 
-        emit Approval(owner_, spender, amount); 
+    function _approve(address owner_, address spender, uint256 amount) internal virtual {
+        require(owner_ != address(0) && spender != address(0), "ERC20: approve zero");
+        _allowances[owner_][spender] = amount;
+        emit Approval(owner_, spender, amount);
     }
 }
 
-interface IUniswapV2Factory { 
-    function createPair(address tokenA, address tokenB) external returns (address pair); 
+interface IUniswapV2Factory {
+    function createPair(address tokenA, address tokenB) external returns (address pair);
 }
 
-interface IUniswapV2Router01 { 
+interface IUniswapV2Router01 {
     function factory() external view returns (address);
     function WETH() external view returns (address);
     function addLiquidityETH(
@@ -155,13 +158,13 @@ interface IUniswapV2Router01 {
         uint amountETHMin,
         address to,
         uint deadline
-    ) 
-        external 
-        payable 
-        returns (uint amountToken, uint amountETH, uint liquidity); 
+    )
+        external
+        payable
+        returns (uint amountToken, uint amountETH, uint liquidity);
 }
 
-interface IUniswapV2Router02 is IUniswapV2Router01 { 
+interface IUniswapV2Router02 is IUniswapV2Router01 {
     function swapExactTokensForETHSupportingFeeOnTransferTokens(
         uint amountIn,
         uint amountOutMin,
@@ -171,14 +174,14 @@ interface IUniswapV2Router02 is IUniswapV2Router01 {
     ) external;
 }
 
-abstract contract ReentrancyLite { 
-    uint256 private _lock; 
-    modifier nonReentrant(){ 
-        require(_lock == 0, "REENTRANCY"); 
-        _lock = 1; 
-        _; 
-        _lock = 0; 
-    } 
+abstract contract ReentrancyLite {
+    uint256 private _lock;
+    modifier nonReentrant(){
+        require(_lock == 0, "REENTRANCY");
+        _lock = 1;
+        _;
+        _lock = 0;
+    }
 }
 
 contract Kindora is ERC20, Ownable, ReentrancyLite {
@@ -193,8 +196,9 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
     address public immutable uniswapV2Pair;
 
     address payable public charityWallet;
+    address public multisig;
 
-    bool public tradingActive = true;
+    bool public tradingActive; // starts false
     bool public limitsInEffect = false;
     uint256 public maxTransactionAmount;
     uint256 public maxWallet;
@@ -207,11 +211,11 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
     uint16 public buyTotalFees;
     uint16 public sellTotalFees;
 
-    bool public feesLocked;
     bool public feeExclusionsLocked;
     bool public charityWalletLocked;
     bool public maxTxExclusionsLocked;
     bool public rescuesLocked;
+    bool public swapEnabled = true;
 
     // internal tracking of tokens assigned for charity & liquidity
     uint256 private tokensForCharity;
@@ -224,16 +228,19 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
     mapping(address => bool) private _isExcludedMaxTransactionAmount;
 
     // Events
-    event FeesLocked();
+    event TradingActiveUpdated(bool active);
     event FeeExclusionsLocked();
     event CharityWalletLocked();
     event MaxTxExclusionsLocked();
     event RescuesLocked();
+    event SwapEnabledUpdated(bool enabled);
     event SetAutomatedMarketMakerPair(address pair, bool value);
     event AutoLiquify(uint256 tokenAmount, uint256 ethAmount);
     event SwapBack(uint256 tokensSwapped, uint256 ethReceived);
+    event SwapBackDetailed(uint256 tokensProcessed, uint256 liqTokens, uint256 ethForLiq, uint256 ethForCharity);
     event ExcludeFromFees(address indexed account, bool excluded);
     event PendingCharityUpdated(uint256 pending);
+    event MultisigUpdated(address indexed newMultisig);
 
     constructor() ERC20("Kindora", "KNR") {
         uint256 total = 1_000_000 * 1e18;
@@ -266,27 +273,25 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         _excludeFromFeesInternal(address(this), true);
         _excludeFromFeesInternal(DEAD, true);
 
-        feeExclusionsLocked = true;
-        emit FeeExclusionsLocked();
-
+        // max-tx exemptions
         _isExcludedMaxTransactionAmount[owner()] = true;
         _isExcludedMaxTransactionAmount[address(this)] = true;
         _isExcludedMaxTransactionAmount[DEAD] = true;
         _isExcludedMaxTransactionAmount[_pair] = true;
         _isExcludedMaxTransactionAmount[address(_router)] = true;
 
-        feesLocked = true;
-        emit FeesLocked();
+        // trading starts OFF; fee exclusions NOT locked yet
+        tradingActive = false;
+        feeExclusionsLocked = false;
     }
 
     // ============== Internal helpers ==============
 
     function _setAutomatedMarketMakerPair(address pair, bool value) private {
-        automatedMarketMakerPairs[pair] = value; 
+        automatedMarketMakerPairs[pair] = value;
         emit SetAutomatedMarketMakerPair(pair, value);
     }
 
-    /// @dev Internal helper to exclude/include an address from fees; emits ExcludeFromFees for observability.
     function _excludeFromFeesInternal(address account, bool excluded) private {
         _isExcludedFromFees[account] = excluded;
         emit ExcludeFromFees(account, excluded);
@@ -294,23 +299,14 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
 
     // ============== View helpers ==============
 
-    function isExcludedFromFees(address account) external view returns (bool) { 
-        return _isExcludedFromFees[account]; 
+    function isExcludedFromFees(address account) external view returns (bool) {
+        return _isExcludedFromFees[account];
     }
 
-    function getTokensForCharity() external view returns (uint256) {
-        return tokensForCharity;
-    }
+    function getTokensForCharity() external view returns (uint256) { return tokensForCharity; }
+    function getTokensForLiquidity() external view returns (uint256) { return tokensForLiquidity; }
+    function getPendingEthForCharity() external view returns (uint256) { return pendingEthForCharity; }
 
-    function getTokensForLiquidity() external view returns (uint256) {
-        return tokensForLiquidity;
-    }
-
-    function getPendingEthForCharity() external view returns (uint256) {
-        return pendingEthForCharity;
-    }
-
-    /// @notice Raw fee values using 1/1000 denominator
     function getFeeInfo()
         external
         view
@@ -339,7 +335,6 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         );
     }
 
-    /// @notice Fee percentages in human-readable % format
     function getFeePercents()
         external
         view
@@ -367,30 +362,53 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
 
     // ============== Owner functions ==============
 
+    function setTradingActive(bool active) external onlyOwner {
+        tradingActive = active;
+        emit TradingActiveUpdated(active);
+    }
+
     function setAutomatedMarketMakerPair(address pair, bool value) external onlyOwner {
-        require(pair != address(0), "pair=0"); 
+        require(pair != address(0), "pair=0");
         _setAutomatedMarketMakerPair(pair, value);
-        if (value) { 
-            _isExcludedMaxTransactionAmount[pair] = true; 
+        if (value) {
+            _isExcludedMaxTransactionAmount[pair] = true;
         }
     }
 
-    /// @notice روشن/خاموش کردن محدودیت Anti-Whale (max tx / max wallet)
     function setLimitsInEffect(bool enabled) external onlyOwner {
         limitsInEffect = enabled;
     }
 
-    /// @notice Can later be pointed to a distributor contract
+    function setSwapEnabled(bool enabled) external onlyOwner {
+        swapEnabled = enabled;
+        emit SwapEnabledUpdated(enabled);
+    }
+
+    function setMultisig(address newMultisig) external onlyOwner {
+        multisig = newMultisig;
+        emit MultisigUpdated(newMultisig);
+    }
+
     function setCharityWallet(address payable newWallet) external onlyOwner {
         require(!charityWalletLocked, "charity wallet locked");
         require(newWallet != address(0), "charity=0");
 
         charityWallet = newWallet;
 
-        // Only if exclusions are not locked, owner could choose to fee-exempt the new wallet
         if (!_isExcludedFromFees[newWallet] && !feeExclusionsLocked) {
             _excludeFromFeesInternal(newWallet, true);
         }
+    }
+
+    function excludeFromFees(address account, bool excluded) external onlyOwner {
+        require(!feeExclusionsLocked, "fee exclusions locked");
+        _excludeFromFeesInternal(account, excluded);
+    }
+
+    function lockFeeExclusions() external onlyOwner {
+        require(!feeExclusionsLocked, "already locked");
+        feeExclusionsLocked = true;
+        emit FeeExclusionsLocked();
     }
 
     function excludeFromMaxTransaction(address account, bool excluded) public onlyOwner {
@@ -398,49 +416,53 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         _isExcludedMaxTransactionAmount[account] = excluded;
     }
 
-    function lockCharityWallet() external onlyOwner { 
-        require(!charityWalletLocked, "already locked"); 
-        charityWalletLocked = true; 
-        emit CharityWalletLocked(); 
+    function lockCharityWallet() external onlyOwner {
+        require(!charityWalletLocked, "already locked");
+        charityWalletLocked = true;
+        emit CharityWalletLocked();
     }
 
-    function lockMaxTxExclusions() external onlyOwner { 
-        require(!maxTxExclusionsLocked, "already locked"); 
-        maxTxExclusionsLocked = true; 
-        emit MaxTxExclusionsLocked(); 
+    function lockMaxTxExclusions() external onlyOwner {
+        require(!maxTxExclusionsLocked, "already locked");
+        maxTxExclusionsLocked = true;
+        emit MaxTxExclusionsLocked();
     }
 
-    function lockRescues() external onlyOwner { 
-        require(!rescuesLocked, "already locked"); 
-        rescuesLocked = true; 
-        emit RescuesLocked(); 
+    function lockRescues() external onlyOwner {
+        require(!rescuesLocked, "already locked");
+        rescuesLocked = true;
+        emit RescuesLocked();
     }
 
     function addLiquidityManually(uint256 tokenAmount) external payable onlyOwner {
         require(tokenAmount > 0, "no tokens");
         require(msg.value > 0, "send BNB");
+
         _transfer(_msgSender(), address(this), tokenAmount);
         _approve(address(this), address(uniswapV2Router), tokenAmount);
+
         uniswapV2Router.addLiquidityETH{value: msg.value}(
             address(this),
             tokenAmount,
             0,
             0,
-            owner(),
+            DEAD, // LP locked forever
             block.timestamp
         );
         emit AutoLiquify(tokenAmount, msg.value);
     }
 
-    function rescueTokens(address token, uint256 amount) external onlyOwner {
+    function rescueTokens(address token, uint256 amount) external {
+        require(msg.sender == owner() || msg.sender == multisig, "not authorized");
         require(!rescuesLocked, "rescues locked");
         require(token != address(this), "no self rescue");
-        require(IERC20(token).transfer(_msgSender(), amount), "rescue token failed");
+        require(IERC20(token).transfer(msg.sender, amount), "rescue token failed");
     }
 
-    function rescueETH(uint256 amount) external onlyOwner {
+    function rescueETH(uint256 amount) external {
+        require(msg.sender == owner() || msg.sender == multisig, "not authorized");
         require(!rescuesLocked, "rescues locked");
-        (bool s,) = payable(_msgSender()).call{value: amount}("");
+        (bool s,) = payable(msg.sender).call{value: amount}("");
         require(s, "rescue eth failed");
     }
 
@@ -455,7 +477,6 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
 
         _approve(address(this), address(uniswapV2Router), tokenAmount);
 
-        // Swap tokens for native chain coin (BNB on BSC)
         uniswapV2Router.swapExactTokensForETHSupportingFeeOnTransferTokens(
             tokenAmount,
             0,
@@ -478,14 +499,14 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         emit AutoLiquify(tokenAmount, ethAmount);
     }
 
-    /// @dev swapBack processes up to swapTokensAtAmount * 20 tokens each run (batch cap).
-    /// It now decrements tokensForCharity/tokensForLiquidity by the actual processed amounts (pro-rata).
     function swapBack() private nonReentrant {
+        if (!swapEnabled) return;
+
         uint256 contractBalance = balanceOf(address(this));
         uint256 totalToSwap = tokensForCharity + tokensForLiquidity;
         if (contractBalance == 0 || totalToSwap == 0) return;
-        if (contractBalance > swapTokensAtAmount * 20) { 
-            contractBalance = swapTokensAtAmount * 20; 
+        if (contractBalance > swapTokensAtAmount * 20) {
+            contractBalance = swapTokensAtAmount * 20;
         }
 
         uint256 liqTokens = (contractBalance * tokensForLiquidity) / totalToSwap;
@@ -504,7 +525,7 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         uint256 ethForCharity = newETH - ethForLiq;
 
         if (halfLiq > 0 && ethForLiq > 0) {
-            _addLiquidity(halfLiq, ethForLiq, DEAD); // LP sent to DEAD
+            _addLiquidity(halfLiq, ethForLiq, DEAD);
         }
         if (ethForCharity > 0 && charityWallet != address(0)) {
             uint256 totalEthForCharity = ethForCharity + pendingEthForCharity;
@@ -519,35 +540,33 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         }
 
         emit SwapBack(toSwapForETH, newETH);
+        emit SwapBackDetailed(contractBalance, liqTokens, ethForLiq, ethForCharity);
 
-        // --- adjust tracked counters by the amounts actually processed ---
         uint256 processedLiquidity = liqTokens;
         uint256 processedCharity = contractBalance - liqTokens;
 
-        // Clamp/subtract processed amounts (avoid underflow)
-        if (processedLiquidity >= tokensForLiquidity) {
-            tokensForLiquidity = 0;
-        } else {
-            tokensForLiquidity -= processedLiquidity;
-        }
+        if (processedLiquidity >= tokensForLiquidity) tokensForLiquidity = 0;
+        else tokensForLiquidity -= processedLiquidity;
 
-        if (processedCharity >= tokensForCharity) {
-            tokensForCharity = 0;
-        } else {
-            tokensForCharity -= processedCharity;
-        }
+        if (processedCharity >= tokensForCharity) tokensForCharity = 0;
+        else tokensForCharity -= processedCharity;
     }
 
     // ============== Core transfer logic ==============
 
-    /// @notice Core transfer routine with fee handling for buys and sells.
-    /// @dev Fees are charged only when neither sender nor receiver are excluded.
-    ///      Burn reduces totalSupply via _burn(). Liquidity tokens are used to add liquidity and LP tokens sent to DEAD (locked).
     function _transfer(address from, address to, uint256 amount) internal override {
         require(from != address(0) && to != address(0), "zero address");
-        if (amount == 0) { 
-            super._transfer(from, to, 0); 
-            return; 
+        if (amount == 0) {
+            super._transfer(from, to, 0);
+            return;
+        }
+
+        // --- Trading gate ---
+        if (!tradingActive) {
+            require(
+                _isExcludedFromFees[from] || _isExcludedFromFees[to],
+                "Trading not active"
+            );
         }
 
         if (limitsInEffect && !swapping) {
@@ -555,23 +574,22 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
                 if (automatedMarketMakerPairs[from]) {
                     require(amount <= maxTransactionAmount, "max tx (buy)");
                     require(balanceOf(to) + amount <= maxWallet, "max wallet");
-                } 
+                }
                 else if (automatedMarketMakerPairs[to]) {
                     require(amount <= maxTransactionAmount, "max tx (sell)");
-                } 
+                }
                 else {
                     require(balanceOf(to) + amount <= maxWallet, "max wallet");
                 }
             }
         }
 
-        // --- Fee processing (compute & take fees) ---
         bool takeFee = !_isExcludedFromFees[from] && !_isExcludedFromFees[to];
         uint256 fees;
 
         if (takeFee) {
             // Sell
-            if (automatedMarketMakerPairs[to]) { 
+            if (automatedMarketMakerPairs[to]) {
                 if (sellTotalFees > 0) {
                     fees = (amount * sellTotalFees) / 1000;
                     uint256 burnAmt = (amount * sellFees.burn) / 1000;
@@ -588,7 +606,7 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
                         super._transfer(from, address(this), remain);
                     }
                 }
-            } 
+            }
             // Buy
             else if (automatedMarketMakerPairs[from]) {
                 if (buyTotalFees > 0) {
@@ -610,24 +628,21 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
             }
         }
 
-        // --- Swapping: check AFTER fees are taken so the swap sees the up-to-date contract balance and token counters.
         uint256 contractBalance = balanceOf(address(this));
         bool canSwap = contractBalance >= swapTokensAtAmount;
 
         if (
-            canSwap && 
-            !swapping && 
-            !automatedMarketMakerPairs[from] && 
-            !_isExcludedFromFees[from] && 
-            !_isExcludedFromFees[to]
+            canSwap &&
+            !swapping &&
+            !automatedMarketMakerPairs[from] &&
+            takeFee
         ) {
-            swapping = true; 
-            swapBack(); 
+            swapping = true;
+            swapBack();
             swapping = false;
         }
 
-        // --- Final transfer of the remaining amount to recipient
-        uint256 sendAmount = amount - fees; 
+        uint256 sendAmount = amount - fees;
         super._transfer(from, to, sendAmount);
     }
 
