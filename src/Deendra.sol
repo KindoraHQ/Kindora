@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity 0.8.24;
 
 /// Kindora (KNR) — ERC20 with buy/sell fees, auto-liquidity and charity forwarding.
 /// Audit-ready A+ cleanup:
@@ -387,6 +387,7 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
     }
 
     function setMultisig(address newMultisig) external onlyOwner {
+        require(newMultisig != address(0), "multisig=0");
         multisig = newMultisig;
         emit MultisigUpdated(newMultisig);
     }
@@ -469,6 +470,15 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         require(s, "rescue eth failed");
     }
 
+    // Override public ERC20 transfer functions to add a nonReentrant guard so external calls during swapBack cannot reenter.
+    function transfer(address to, uint256 amount) public override nonReentrant returns (bool) {
+        return super.transfer(to, amount);
+    }
+
+    function transferFrom(address from, address to, uint256 amount) public override nonReentrant returns (bool) {
+        return super.transferFrom(from, to, amount);
+    }
+
     // ============== Swap & liquidity ==============
 
     function _swapTokensForEth(uint256 tokenAmount) private {
@@ -502,7 +512,10 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         emit AutoLiquify(tokenAmount, ethAmount);
     }
 
-    function swapBack() private nonReentrant {
+    // swapBack is intentionally private and is invoked from _transfer.
+    // It used to be nonReentrant; instead, we guard public transfer entry points with nonReentrant
+    // and make internal state updates before external calls to mitigate reentrancy findings.
+    function swapBack() private {
         if (!swapEnabled) return;
 
         uint256 contractBalance = balanceOf(address(this));
@@ -527,24 +540,7 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         uint256 ethForLiq     = toSwapForETH > 0 ? (newETH * halfLiq) / toSwapForETH : 0;
         uint256 ethForCharity = newETH - ethForLiq;
 
-        if (halfLiq > 0 && ethForLiq > 0) {
-            _addLiquidity(halfLiq, ethForLiq, DEAD);
-        }
-        if (ethForCharity > 0 && charityWallet != address(0)) {
-            uint256 totalEthForCharity = ethForCharity + pendingEthForCharity;
-            (bool s,) = charityWallet.call{value: totalEthForCharity}("");
-            if (!s) {
-                pendingEthForCharity = totalEthForCharity;
-                emit PendingCharityUpdated(pendingEthForCharity);
-            } else {
-                pendingEthForCharity = 0;
-                emit PendingCharityUpdated(0);
-            }
-        }
-
-        emit SwapBack(toSwapForETH, newETH);
-        emit SwapBackDetailed(contractBalance, liqTokens, ethForLiq, ethForCharity);
-
+        // Compute processed amounts up-front and update token-side state BEFORE making external calls.
         uint256 processedLiquidity = liqTokens;
         uint256 processedCharity = contractBalance - liqTokens;
 
@@ -553,6 +549,29 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
 
         if (processedCharity >= tokensForCharity) tokensForCharity = 0;
         else tokensForCharity -= processedCharity;
+
+        // Add liquidity (external call) if required
+        if (halfLiq > 0 && ethForLiq > 0) {
+            _addLiquidity(halfLiq, ethForLiq, DEAD);
+        }
+
+        // Send ETH to charity: attempt push, but if it fails, record pending amount.
+        if (ethForCharity > 0 && charityWallet != address(0)) {
+            uint256 totalEthForCharity = ethForCharity + pendingEthForCharity;
+            // reset pending ahead of the external call to avoid being left in inconsistent state if reentered
+            pendingEthForCharity = 0;
+            (bool s,) = charityWallet.call{value: totalEthForCharity}("");
+            if (!s) {
+                // restore pending if send failed
+                pendingEthForCharity = totalEthForCharity;
+                emit PendingCharityUpdated(pendingEthForCharity);
+            } else {
+                emit PendingCharityUpdated(0);
+            }
+        }
+
+        emit SwapBack(toSwapForETH, newETH);
+        emit SwapBackDetailed(contractBalance, liqTokens, ethForLiq, ethForCharity);
     }
 
     // ============== Core transfer logic ==============
@@ -588,7 +607,7 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         }
 
         bool takeFee = !_isExcludedFromFees[from] && !_isExcludedFromFees[to];
-        uint256 fees;
+        uint256 fees = 0;
 
         if (takeFee) {
             // Sell
