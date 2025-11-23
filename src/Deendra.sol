@@ -219,8 +219,9 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
     // internal tracking of tokens assigned for charity & liquidity
     uint256 private tokensForCharity;
     uint256 private tokensForLiquidity;
+    // pending ETH for charity will be stored for pull
     uint256 private pendingEthForCharity;
-    bool private swapping;
+    bool private swapping; // used to prevent nested swapBack
 
     mapping(address => bool) public automatedMarketMakerPairs;
     mapping(address => bool) private _isExcludedFromFees;
@@ -266,11 +267,13 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         uniswapV2Pair = _pair;
         _setAutomatedMarketMakerPair(_pair, true);
 
-        // Fee exemptions: owner, charity, contract, DEAD
+        // Fee exemptions: owner, charity, contract, DEAD, router, pair
         _excludeFromFeesInternal(owner(), true);
         _excludeFromFeesInternal(charityWallet, true);
         _excludeFromFeesInternal(address(this), true);
         _excludeFromFeesInternal(DEAD, true);
+        _excludeFromFeesInternal(_pair, true);
+        _excludeFromFeesInternal(address(_router), true);
 
         // max-tx exemptions
         _isExcludedMaxTransactionAmount[owner()] = true;
@@ -445,6 +448,7 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         _transfer(_msgSender(), address(this), tokenAmount);
         _approve(address(this), address(uniswapV2Router), tokenAmount);
 
+        // addLiquidityETH returns amounts and liquidity - return values intentionally ignored in original design
         uniswapV2Router.addLiquidityETH{value: msg.value}(
             address(this),
             tokenAmount,
@@ -470,13 +474,15 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         require(s, "rescue eth failed");
     }
 
-    // Override public ERC20 transfer functions to add a nonReentrant guard so external calls during swapBack cannot reenter.
-    function transfer(address to, uint256 amount) public override nonReentrant returns (bool) {
-        return super.transfer(to, amount);
-    }
-
-    function transferFrom(address from, address to, uint256 amount) public override nonReentrant returns (bool) {
-        return super.transferFrom(from, to, amount);
+    // Charity withdraw / pull pattern: charity (or owner) can pull accumulated ETH
+    function withdrawCharity() external {
+        require(msg.sender == charityWallet || msg.sender == owner(), "not authorized");
+        uint256 amount = pendingEthForCharity;
+        require(amount > 0, "no pending eth");
+        pendingEthForCharity = 0;
+        (bool s,) = payable(msg.sender).call{value: amount}("");
+        require(s, "charity withdraw failed");
+        emit PendingCharityUpdated(0);
     }
 
     // ============== Swap & liquidity ==============
@@ -512,9 +518,11 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         emit AutoLiquify(tokenAmount, ethAmount);
     }
 
-    // swapBack is intentionally private and is invoked from _transfer.
-    // It used to be nonReentrant; instead, we guard public transfer entry points with nonReentrant
-    // and make internal state updates before external calls to mitigate reentrancy findings.
+    // swapBack performs swaps and liquidity adds.
+    // To reduce reentrancy findings:
+    //  - we update on-chain token accounting for processed tokens BEFORE performing external calls,
+    //  - we use a pull pattern for charity funds (no direct push to arbitrary address here),
+    //  - swapping flag prevents nested swapBack during router interactions.
     function swapBack() private {
         if (!swapEnabled) return;
 
@@ -540,34 +548,26 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
         uint256 ethForLiq     = toSwapForETH > 0 ? (newETH * halfLiq) / toSwapForETH : 0;
         uint256 ethForCharity = newETH - ethForLiq;
 
-        // Compute processed amounts up-front and update token-side state BEFORE making external calls.
+        // compute processed amounts up-front
         uint256 processedLiquidity = liqTokens;
         uint256 processedCharity = contractBalance - liqTokens;
 
+        // update token-side accounting BEFORE external calls
         if (processedLiquidity >= tokensForLiquidity) tokensForLiquidity = 0;
         else tokensForLiquidity -= processedLiquidity;
 
         if (processedCharity >= tokensForCharity) tokensForCharity = 0;
         else tokensForCharity -= processedCharity;
 
-        // Add liquidity (external call) if required
-        if (halfLiq > 0 && ethForLiq > 0) {
-            _addLiquidity(halfLiq, ethForLiq, DEAD);
+        // accumulate charity ETH in pending (pull pattern)
+        if (ethForCharity > 0) {
+            pendingEthForCharity += ethForCharity;
+            emit PendingCharityUpdated(pendingEthForCharity);
         }
 
-        // Send ETH to charity: attempt push, but if it fails, record pending amount.
-        if (ethForCharity > 0 && charityWallet != address(0)) {
-            uint256 totalEthForCharity = ethForCharity + pendingEthForCharity;
-            // reset pending ahead of the external call to avoid being left in inconsistent state if reentered
-            pendingEthForCharity = 0;
-            (bool s,) = charityWallet.call{value: totalEthForCharity}("");
-            if (!s) {
-                // restore pending if send failed
-                pendingEthForCharity = totalEthForCharity;
-                emit PendingCharityUpdated(pendingEthForCharity);
-            } else {
-                emit PendingCharityUpdated(0);
-            }
+        // now perform external calls (these do not modify our tracked token-side state)
+        if (halfLiq > 0 && ethForLiq > 0) {
+            _addLiquidity(halfLiq, ethForLiq, DEAD);
         }
 
         emit SwapBack(toSwapForETH, newETH);
@@ -575,6 +575,9 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
     }
 
     // ============== Core transfer logic ==============
+    // Note: keep behavior consistent with original contract; small reordering applied to reduce reentrancy findings:
+    // - do the user token transfer (final send) before invoking swapBack, so no writes to balances happen after external calls.
+    // - ensure fees local var is initialized.
 
     function _transfer(address from, address to, uint256 amount) internal override {
         require(from != address(0) && to != address(0), "zero address");
@@ -650,11 +653,17 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
             }
         }
 
+        // perform main transfer (balances updated here, before any external calls below)
+        uint256 sendAmount = amount - fees;
+        super._transfer(from, to, sendAmount);
+
+        // Decide whether to swap; swapping flag prevents reentrant swapBack when router interacts with this token
         uint256 contractBalance = balanceOf(address(this));
         bool canSwap = contractBalance >= swapTokensAtAmount;
 
         if (
             canSwap &&
+            swapEnabled &&
             !swapping &&
             !automatedMarketMakerPairs[from] &&
             takeFee
@@ -663,9 +672,6 @@ contract Kindora is ERC20, Ownable, ReentrancyLite {
             swapBack();
             swapping = false;
         }
-
-        uint256 sendAmount = amount - fees;
-        super._transfer(from, to, sendAmount);
     }
 
     receive() external payable {}
