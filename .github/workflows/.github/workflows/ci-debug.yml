@@ -1,9 +1,4 @@
-name: CI Debug (Foundry)
-
-on:
-  push:
-    branches: ["main", "master"]
-  pull_request:
+on: [push, pull_request]
 
 jobs:
   debug-foundry:
@@ -14,23 +9,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Print working directory + files
+      - name: Show git info
+        run: |
+          echo "Current ref: $GITHUB_REF"
+          git rev-parse --verify HEAD || true
+          git status --porcelain --untracked-files=all || true
+
+      - name: Print working directory and root files
         run: |
           echo "PWD: $(pwd)"
-          echo "=== ROOT ==="
+          echo "Root listing:"
           ls -la
-          echo "=== SRC ==="
+          echo "src listing:"
           ls -la src || true
-          echo "=== foundry.toml ==="
+          echo "foundry.toml content:"
           sed -n '1,200p' foundry.toml || true
-
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: nightly
+          echo "Show src/Kindora.sol head:"
+          sed -n '1,200p' src/Kindora.sol || true
 
       - name: Forge version
-        run: forge --version
+        run: |
+          which forge || true
+          forge --version || true
 
       - name: Forge build (verbose)
-        run: forge build -v
+        run: |
+          forge build -v
